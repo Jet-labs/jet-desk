@@ -91,7 +91,7 @@ export function startAppWatcher(intervalMs = 2000): void {
       // Log which plugin would be auto-activated
       const plugin = getPluginByAppTrigger(win.name);
       if (plugin) {
-        console.log(`[AppWatch] Detected "${win.name}" → suggest remote: "${plugin.name}"`);
+        console.log(`[AppWatch] Detected "${win.name}" → plugin registered`);
       }
     } catch (e) {
       // Non-fatal — poll failure is OK

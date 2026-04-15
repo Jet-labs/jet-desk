@@ -64,14 +64,18 @@ export default function CommandCenterLayout() {
   const openDrawer  = useCallback(() => setDrawerOpen(true), []);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
+  const isIndividualRemote = pathname.split('/').length > 3 && pathname.includes('/remote/custom/');
+
   return (
     <View style={styles.root}>
-      <TopBar
-        deviceName={activeDevice?.hostname || 'Connected'}
-        onDisconnect={handleDisconnect}
-        onMenuPress={openDrawer}
-        activeModuleLabel={activeLabel}
-      />
+      {!isIndividualRemote && (
+        <TopBar
+          deviceName={activeDevice?.hostname || 'Connected'}
+          onDisconnect={handleDisconnect}
+          onMenuPress={openDrawer}
+          activeModuleLabel={activeLabel}
+        />
+      )}
 
       {/* Tabs navigator with hidden tab bar — expo-router handles
           route resolution, initial screen, and flat peer nav. */}

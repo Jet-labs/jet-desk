@@ -1,13 +1,13 @@
 /**
  * Built-in Remote Configurations
- * These are hardcoded defaults. Custom remotes can be fetched from daemon.
+ * These are hardcoded defaults. Custom remotes can be created via the editor.
  */
 
 export interface RemoteButton {
   id: string;
   label: string;
   icon?: string;       // Emoji or icon name
-  action: string;      // Protocol message type
+  action: string;      // Protocol message type (e.g. 'input.key.tap')
   payload: any;        // Message payload
   size?: '1x1' | '2x1' | '1x2' | '2x2';
   color?: string;      // Optional accent color override
@@ -19,7 +19,41 @@ export interface RemoteConfig {
   icon: string;
   columns: number;
   buttons: RemoteButton[];
+  enabled?: boolean;
 }
+
+// ─── Custom remote types (matches daemon CustomRemoteConfig) ────────────────
+
+export interface CustomRemoteConfig {
+  id: string;
+  name: string;
+  icon: string;
+  columns: number;
+  enabled: boolean;
+  buttons: RemoteButton[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ─── Available action types for the button editor ───────────────────────────
+
+export const ACTION_TYPES = [
+  { id: 'input.key.tap',      label: 'Key Tap',      needsKey: true  },
+  { id: 'input.key.down',     label: 'Key Down',     needsKey: true  },
+  { id: 'input.key.up',       label: 'Key Up',       needsKey: true  },
+  { id: 'input.shortcut',     label: 'Shortcut',     needsKeys: true },
+  { id: 'input.type',         label: 'Type Text',    needsText: true },
+  { id: 'input.mouse.click',  label: 'Mouse Click',  needsButton: true },
+  { id: 'input.mouse.down',   label: 'Mouse Down',   needsButton: true },
+  { id: 'input.mouse.up',     label: 'Mouse Up',     needsButton: true },
+  { id: 'input.mouse.scroll', label: 'Mouse Scroll', needsScroll: true },
+  { id: 'system.sleep',       label: 'Sleep',        isSystem: true  },
+  { id: 'system.lock',        label: 'Lock',         isSystem: true  },
+  { id: 'system.shutdown',    label: 'Shutdown',     isSystem: true  },
+  { id: 'system.restart',     label: 'Restart',      isSystem: true  },
+  { id: 'system.app.launch',  label: 'Launch App',   needsPath: true },
+  { id: 'system.shell.exec',  label: 'Terminal Command', needsCmd: true },
+] as const;
 
 // ─── Media Remote ────────────────────────────────────────────────────────────
 

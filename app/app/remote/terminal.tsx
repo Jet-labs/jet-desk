@@ -1,6 +1,8 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, KeyboardAvoidingView, Platform, Keyboard } from 'react-native';
-import { Square, Play, Send, Keyboard as KeyboardIcon } from 'lucide-react-native';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Platform, Keyboard } from 'react-native';
+import BottomSheet, { BottomSheetView, BottomSheetScrollView, BottomSheetTextInput } from '@gorhom/bottom-sheet';
+import { Square, Play, Send, Keyboard as KeyboardIcon, Bookmark, BookmarkPlus, Trash2, ChevronUp } from 'lucide-react-native';
+import { useTerminalStore } from '../../src/store/terminalStore';
 
 import { useConnectivity } from '../../src/contexts/ConnectivityContext';
 import { MSG } from '../../src/network/protocol';
@@ -16,9 +18,18 @@ export default function TerminalModule() {
   const [customCmd, setCustomCmd] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  
+  const presets = useTerminalStore(s => s.presets);
+  const addPreset = useTerminalStore(s => s.addPreset);
+  const removePreset = useTerminalStore(s => s.removePreset);
+  const loadPresets = useTerminalStore(s => s.loadPresets);
 
+  const snapPoints = useMemo(() => {
+    if (presets.length === 0) return ['18%']; 
+    return ['30%', '95%'];
+  }, [presets.length]);
+  const bottomSheetRef = useRef<BottomSheet>(null);
   const scrollViewRef = useRef<ScrollView>(null);
-  const inputRef = useRef<TextInput>(null);
   const keyboardInputRef = useRef<TextInput>(null);
 
   // ── Global Keyboard Handlers ─────────────────────────────────────────
@@ -40,6 +51,7 @@ export default function TerminalModule() {
   }, [showKeyboard]);
 
   useEffect(() => {
+    loadPresets();
     if (status === 'connected') {
       sendEvent(MSG.SHELL_GET_ALLOWED, {});
     }
@@ -105,124 +117,179 @@ export default function TerminalModule() {
   }, [activeProcessId, sendEvent]);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'padding'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
-    >
-      {/* Kill bar — only when a process is running */}
-      {activeProcessId && (
-        <View style={styles.killBar}>
-          <ActivityIndicator size="small" color={Theme.colors.accent} />
-          <Text style={styles.killBarText}>Process running…</Text>
-          <TouchableOpacity style={styles.killBtn} onPress={handleKill}>
-            <Square size={14} color="#FFF" fill="#FFF" />
-            <Text style={styles.killBtnText}>Kill</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+    <View style={styles.root}>
+      {/* ── Terminal Output (Background) ── */}
+      <View style={styles.terminalWrapper}>
+        {/* Kill bar — only when a process is running */}
+        {activeProcessId && (
+          <View style={styles.killBar}>
+            <ActivityIndicator size="small" color={Theme.colors.accent} />
+            <Text style={styles.killBarText}>Process running…</Text>
+            <TouchableOpacity style={styles.killBtn} onPress={handleKill}>
+              <Square size={14} color="#FFF" fill="#FFF" />
+              <Text style={styles.killBtnText}>Kill</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-      {/* Terminal output */}
-      <ScrollView 
-        ref={scrollViewRef}
-        style={styles.terminalContainer} 
-        contentContainerStyle={styles.terminalContent}
-        keyboardShouldPersistTaps="handled"
-      >
-        <Text style={styles.terminalText}>{output}</Text>
-      </ScrollView>
-
-      {/* Modifier Row for pre-defined shortcuts */}
-      {showKeyboard && (
-        <View style={styles.modifierContainer}>
-          <ModifierRow
-            onKeyTap={handleModKeyTap}
-            onKeyDown={handleModKeyDown}
-            onKeyUp={handleModKeyUp}
-          />
-        </View>
-      )}
-
-      {/* Command Input — always visible */}
-      <View style={styles.inputSection}>
-        <View style={styles.inputRow}>
-          <Text style={styles.prompt}>$</Text>
-          <TextInput
-            ref={inputRef}
-            style={styles.input}
-            value={customCmd}
-            onChangeText={setCustomCmd}
-            onSubmitEditing={handleCustomSubmit}
-            placeholder="Type any command…"
-            placeholderTextColor={Theme.colors.textTertiary}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="off"
-            editable={!activeProcessId}
-            returnKeyType="send"
-          />
-          <TouchableOpacity
-            style={[styles.sendBtn, (!customCmd.trim() || activeProcessId) && styles.sendBtnDisabled]}
-            onPress={handleCustomSubmit}
-            disabled={!customCmd.trim() || !!activeProcessId}
-          >
-            {activeProcessId ? (
-              <ActivityIndicator size="small" color={Theme.colors.textSecondary} />
-            ) : (
-              <Send size={18} color={customCmd.trim() ? Theme.colors.accent : Theme.colors.textTertiary} />
-            )}
-          </TouchableOpacity>
-        </View>
-
-        {/* Quick Commands + History — inline below input */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipsRow}
+        <ScrollView 
+          ref={scrollViewRef}
+          style={styles.terminalContainer} 
+          contentContainerStyle={styles.terminalContent}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Virtual Keyboard Toggle */}
-          <TouchableOpacity
-            style={[styles.cmdBtn, showKeyboard && styles.cmdBtnActive]}
-            onPress={toggleKeyboard}
-          >
-            <KeyboardIcon size={14} color={showKeyboard ? Theme.colors.background : Theme.colors.textPrimary} />
-            <Text style={[styles.cmdBtnText, showKeyboard && { color: Theme.colors.background }]}>Keyboard</Text>
-          </TouchableOpacity>
-
-          {/* Interrupt Option */}
-          {activeProcessId && (
-            <TouchableOpacity
-              style={[styles.cmdBtn, { borderColor: Theme.colors.error, backgroundColor: 'rgba(229, 72, 77, 0.1)' }]}
-              onPress={handleKill}
-            >
-              <Text style={[styles.cmdBtnText, { color: Theme.colors.error }]}>Ctrl+C</Text>
-            </TouchableOpacity>
-          )}
-
-          {commands.map(cmd => (
-              <TouchableOpacity
-                key={cmd}
-                style={[styles.cmdBtn, activeProcessId && styles.cmdBtnDisabled]}
-                disabled={!!activeProcessId}
-                onPress={() => handleExecute(cmd)}
-              >
-                <Play size={12} color={Theme.colors.accent} />
-                <Text style={styles.cmdBtnText}>{cmd}</Text>
-              </TouchableOpacity>
-            ))}
-            {history.filter(h => !commands.includes(h)).map((cmd, i) => (
-              <TouchableOpacity
-                key={`h-${i}`}
-                style={[styles.cmdBtn, styles.historyBtn, activeProcessId && styles.cmdBtnDisabled]}
-                disabled={!!activeProcessId}
-                onPress={() => { setCustomCmd(cmd); }}
-              >
-                <Text style={[styles.cmdBtnText, { color: Theme.colors.textSecondary }]}>{cmd}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+          <Text style={styles.terminalText}>{output}</Text>
+        </ScrollView>
       </View>
+
+      {/* ── Command Interface (BottomSheet) ── */}
+      <BottomSheet
+        ref={bottomSheetRef}
+        snapPoints={snapPoints}
+        keyboardBehavior="extend"
+        keyboardBlurBehavior="none"
+        backgroundStyle={styles.sheetBackground}
+        handleIndicatorStyle={styles.sheetIndicator}
+      >
+        <View style={styles.sheetContent}>
+          {/* ── Sticky Top Section ── */}
+          <View style={styles.stickyHeader}>
+            {/* Input Row */}
+            <View style={styles.inputRow}>
+              <Text style={styles.prompt}>$</Text>
+              <BottomSheetTextInput
+                style={styles.input}
+                value={customCmd}
+                onChangeText={setCustomCmd}
+                onSubmitEditing={handleCustomSubmit}
+                placeholder="Type command…"
+                placeholderTextColor={Theme.colors.textTertiary}
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="off"
+                editable={!activeProcessId}
+                returnKeyType="send"
+              />
+              <TouchableOpacity
+                style={[styles.actionBtn, !customCmd.trim() && styles.actionBtnDisabled]}
+                onPress={() => {
+                  if (customCmd.trim()) {
+                    addPreset(customCmd.trim());
+                    setCustomCmd('');
+                  }
+                }}
+                disabled={!customCmd.trim()}
+              >
+                <BookmarkPlus size={20} color={customCmd.trim() ? Theme.colors.textSecondary : Theme.colors.textTertiary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionBtn, (!customCmd.trim() || activeProcessId) && styles.actionBtnDisabled]}
+                onPress={handleCustomSubmit}
+                disabled={!customCmd.trim() || !!activeProcessId}
+              >
+                {activeProcessId ? (
+                  <ActivityIndicator size="small" color={Theme.colors.textSecondary} />
+                ) : (
+                  <Send size={20} color={customCmd.trim() ? Theme.colors.accent : Theme.colors.textTertiary} />
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {/* History Row */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chipsRow}
+              style={styles.historyScroll}
+              keyboardShouldPersistTaps="handled"
+            >
+              <TouchableOpacity
+                style={[styles.cmdBtn, showKeyboard && styles.cmdBtnActive]}
+                onPress={toggleKeyboard}
+              >
+                <KeyboardIcon size={14} color={showKeyboard ? Theme.colors.background : Theme.colors.textPrimary} />
+                <Text style={[styles.cmdBtnText, showKeyboard && { color: Theme.colors.background }]}>Keys</Text>
+              </TouchableOpacity>
+
+              {activeProcessId && (
+                <TouchableOpacity
+                  style={[styles.cmdBtn, { borderColor: Theme.colors.error, backgroundColor: 'rgba(229, 72, 77, 0.1)' }]}
+                  onPress={handleKill}
+                >
+                  <Text style={[styles.cmdBtnText, { color: Theme.colors.error }]}>Ctrl+C</Text>
+                </TouchableOpacity>
+              )}
+
+              {commands.map(cmd => (
+                <TouchableOpacity
+                  key={cmd}
+                  style={[styles.cmdBtn, activeProcessId && styles.cmdBtnDisabled]}
+                  disabled={!!activeProcessId}
+                  onPress={() => handleExecute(cmd)}
+                >
+                  <Play size={12} color={Theme.colors.accent} />
+                  <Text style={styles.cmdBtnText}>{cmd}</Text>
+                </TouchableOpacity>
+              ))}
+
+              {history.filter(h => !commands.includes(h) && !presets.includes(h)).map((cmd, i) => (
+                <TouchableOpacity
+                  key={`h-${i}`}
+                  style={[styles.cmdBtn, styles.historyBtn, activeProcessId && styles.cmdBtnDisabled]}
+                  disabled={!!activeProcessId}
+                  onPress={() => { setCustomCmd(cmd); }}
+                >
+                  <Text style={[styles.cmdBtnText, { color: Theme.colors.textSecondary }]}>{cmd}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* ── Scrollable Presets Section ── */}
+          {presets.length > 0 && (
+            <BottomSheetScrollView 
+              style={styles.scrollableArea}
+              contentContainerStyle={styles.presetsList}
+            >
+              <View style={styles.presetHeader}>
+                <View style={styles.presetTitleWrap}>
+                  <Bookmark size={14} color={Theme.colors.accent} fill={Theme.colors.accent} />
+                  <Text style={styles.presetTitle}>BOOKMARKED PRESETS</Text>
+                </View>
+                <Text style={styles.presetHelp}>Long-press to delete</Text>
+              </View>
+
+              <View style={styles.presetsGrid}>
+                {presets.map((cmd, i) => (
+                  <TouchableOpacity
+                    key={`p-${i}`}
+                    style={[styles.presetItem, activeProcessId && styles.cmdBtnDisabled]}
+                    disabled={!!activeProcessId}
+                    onLongPress={() => removePreset(i)}
+                    onPress={() => handleExecute(cmd)}
+                  >
+                    <Text style={styles.presetItemText} numberOfLines={1}>{cmd}</Text>
+                    <TouchableOpacity onPress={() => removePreset(i)} style={styles.trashBtn}>
+                      <Trash2 size={12} color={Theme.colors.textDisabled} />
+                    </TouchableOpacity>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Virtual Keyboard Modifier Row */}
+              {showKeyboard && (
+                <View style={styles.modifierWrapper}>
+                  <ModifierRow
+                    onKeyTap={handleModKeyTap}
+                    onKeyDown={handleModKeyDown}
+                    onKeyUp={handleModKeyUp}
+                  />
+                </View>
+              )}
+            </BottomSheetScrollView>
+          )}
+        </View>
+      </BottomSheet>
 
       {/* Hidden text input for global keystrokes */}
       {showKeyboard && (
@@ -242,14 +309,17 @@ export default function TerminalModule() {
           blurOnSubmit={false}
         />
       )}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: Theme.colors.background,
+    backgroundColor: '#000',
+  },
+  terminalWrapper: {
+    flex: 1,
   },
   killBar: {
     flexDirection: 'row',
@@ -293,13 +363,24 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     fontFamily: 'monospace',
   },
-  inputSection: {
+
+  // ── Bottom Sheet Styles ──
+  sheetBackground: {
     backgroundColor: Theme.colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: Theme.colors.border,
+  },
+  sheetIndicator: {
+    backgroundColor: Theme.colors.borderLight,
+    width: 40,
+  },
+  sheetContent: {
+    flex: 1,
+  },
+  stickyHeader: {
     paddingHorizontal: Theme.spacing.md,
-    paddingTop: Theme.spacing.sm,
     paddingBottom: Theme.spacing.sm,
+  },
+  scrollableArea: {
+    flex: 1,
   },
   inputRow: {
     flexDirection: 'row',
@@ -309,10 +390,11 @@ const styles = StyleSheet.create({
     borderColor: Theme.colors.border,
     borderRadius: Theme.radius.lg,
     paddingHorizontal: 12,
+    marginTop: 4,
   },
   prompt: {
     color: Theme.colors.accent,
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '700',
     fontFamily: 'monospace',
     marginRight: 8,
@@ -320,19 +402,23 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     color: Theme.colors.textPrimary,
-    fontSize: 14,
+    fontSize: 15,
     fontFamily: 'monospace',
-    paddingVertical: 12,
+    paddingVertical: 14,
   },
-  sendBtn: {
-    padding: 8,
+  actionBtn: {
+    padding: 10,
+    marginLeft: 4,
   },
-  sendBtnDisabled: {
-    opacity: 0.4,
+  actionBtnDisabled: {
+    opacity: 0.3,
+  },
+  historyScroll: {
+    marginTop: Theme.spacing.sm,
   },
   chipsRow: {
-    paddingTop: Theme.spacing.sm,
-    gap: Theme.spacing.sm,
+    gap: 8,
+    paddingBottom: 4,
   },
   cmdBtn: {
     flexDirection: 'row',
@@ -343,7 +429,7 @@ const styles = StyleSheet.create({
     borderColor: Theme.colors.border,
     paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: Theme.radius.lg,
+    borderRadius: Theme.radius.md,
   },
   cmdBtnDisabled: {
     opacity: 0.5,
@@ -354,19 +440,81 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   cmdBtnActive: {
-    backgroundColor: Theme.colors.textPrimary,
-    borderColor: Theme.colors.textPrimary,
+    backgroundColor: Theme.colors.accent,
+    borderColor: Theme.colors.accent,
   },
   historyBtn: {
-    borderColor: Theme.colors.borderLight,
-    backgroundColor: Theme.colors.background,
+    borderColor: Theme.colors.borderSubtle,
+    backgroundColor: 'transparent',
   },
-  modifierContainer: {
-    backgroundColor: Theme.colors.surface,
-    // paddingTop: Theme.spacing.sm,
-    paddingHorizontal: Theme.spacing.sm,
+
+  // ── Presets Section ──
+  presetsList: {
+    padding: Theme.spacing.md,
+    paddingTop: 8,
+  },
+  presetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: Theme.colors.borderLight,
+    borderTopColor: Theme.colors.borderSubtle,
+  },
+  presetTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  presetTitle: {
+    color: Theme.colors.accent,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.2,
+  },
+  presetHelp: {
+    color: Theme.colors.textTertiary,
+    fontSize: 10,
+    fontStyle: 'italic',
+  },
+  presetsGrid: {
+    gap: 8,
+  },
+  presetItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Theme.colors.surfaceElevated,
+    paddingVertical: 12,
+    paddingHorizontal: Theme.spacing.md,
+    borderRadius: Theme.radius.md,
+    borderLeftWidth: 3,
+    borderLeftColor: Theme.colors.accent,
+  },
+  presetItemText: {
+    color: Theme.colors.textPrimary,
+    fontSize: 14,
+    fontFamily: 'monospace',
+    flex: 1,
+  },
+  trashBtn: {
+    padding: 6,
+    marginLeft: 12,
+  },
+  emptyPresets: {
+    paddingVertical: 40,
+    alignItems: 'center',
+  },
+  emptyText: {
+    color: Theme.colors.textTertiary,
+    fontSize: 13,
+  },
+  modifierWrapper: {
+    marginTop: Theme.spacing.lg,
+    paddingTop: Theme.spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Theme.colors.borderSubtle,
   },
   hiddenInput: {
     position: 'absolute',

@@ -131,7 +131,21 @@ export const MODIFIER_ALIASES: Record<string, string> = {
   option:    'alt',
   meta:      'lwin',
   windows:   'lwin',
+  win:       'lwin',
 };
+
+export function isExtendedKey(vk: number): boolean {
+  // https://learn.microsoft.com/en-us/windows/win32/inputdev/about-keyboard-input#extended-key-flag
+  const extended = [
+    0x21, 0x22, 0x23, 0x24, // PageUp, PageDown, End, Home
+    0x25, 0x26, 0x27, 0x28, // Left, Up, Right, Down
+    0x2C, 0x2D, 0x2E,       // PrintScreen, Insert, Delete
+    0x5B, 0x5C, 0x5D,       // LWin, RWin, Apps
+    0xA1, 0xA3, 0xA5,       // RShift, RCtrl, RAlt
+    0x6F, 0x90, 0x91,       // Divide, NumLock, ScrollLock
+  ];
+  return extended.includes(vk);
+}
 
 export function normalizeModifier(mod: string): string {
   return MODIFIER_ALIASES[mod.toLowerCase()] ?? mod.toLowerCase();

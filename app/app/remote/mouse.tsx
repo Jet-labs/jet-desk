@@ -7,8 +7,8 @@
  * Tap < 250ms, < 10px movement → click
  * Long press > 400ms, < 10px movement → drag mode
  *
- * Gyroscope laser uses an EMA low-pass filter for smooth output
- * and a 16ms flush interval (60Hz) matched to the sensor rate.
+ * Gyroscope laser sends directly from the sensor callback (no rAF delay),
+ * matching the trackpad's immediate dispatch behavior.
  */
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
@@ -26,9 +26,10 @@ import {
   Dimensions,
   KeyboardAvoidingView,
   Platform,
+  Switch,
 } from 'react-native';
 import { Keyboard as KeyboardIcon, Crosshair, Settings, X } from 'lucide-react-native';
-import { Gyroscope } from 'expo-sensors';
+import { Gyroscope, Accelerometer } from 'expo-sensors';
 
 import { useConnectivity }           from '../../src/contexts/ConnectivityContext';
 import { connectionManager }         from '../../src/network/ConnectionManager';
@@ -56,21 +57,24 @@ export default function MouseModule() {
   // ── Configurable sensitivity ────────────────────────────────────────
   const [trackpadSens, setTrackpadSens] = useState(() => loadSensitivity('trackpad', 1.5));
   const [gyroSens, setGyroSens]         = useState(() => loadSensitivity('gyro', 50));
+  const [invertScroll, setInvertScroll] = useState(() => storage.getBoolean('invertScroll') ?? false);
 
   // Keep refs in sync for hot-path access (no re-render needed)
   const trackpadSensRef = useRef(trackpadSens);
   const gyroSensRef     = useRef(gyroSens);
+  const invertScrollRef = useRef(invertScroll);
   useEffect(() => { trackpadSensRef.current = trackpadSens; storage.set('trackpad', trackpadSens); }, [trackpadSens]);
   useEffect(() => { gyroSensRef.current = gyroSens;         storage.set('gyro', gyroSens);         }, [gyroSens]);
+  useEffect(() => { invertScrollRef.current = invertScroll; storage.set('invertScroll', invertScroll); }, [invertScroll]);
 
-  // ── Gyro internals ──────────────────────────────────────────────────
-  const gyroSubscription = useRef<any>(null);
-  const gyroFlushTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const gyroAccum        = useRef({ dx: 0, dy: 0 });
+  // ── Gyro internals (complementary filter fusion) ────────────────────
+  const gyroSubscription  = useRef<any>(null);
+  const accelSubscription = useRef<any>(null);
+  const gyroAccum         = useRef({ dx: 0, dy: 0 });
 
   // ── Touch state (refs = zero re-renders) ────────────────────────────
 
-  const prevTouch      = useRef({ x: 0, y: 0 });
+  const prevTouch      = useRef({ x: 0, y: 0, id: '' as any });
   const touchCount     = useRef(0);
   const touchStartTime = useRef(0);
   const touchStartPos  = useRef({ x: 0, y: 0 });
@@ -78,114 +82,255 @@ export default function MouseModule() {
   const scrollAccum    = useRef(0);
   const isDragging     = useRef(false);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isButtonDown   = useRef(false);
+  const buttonHeld     = useRef<'left' | 'right' | null>(null);
 
-  // ── Raw touch handlers ───────────────────────────────────────────────
+  // Pinch-to-zoom state
+  const prevPinchDist     = useRef(-1);
+  const pinchAccum        = useRef(0);
+  const isCtrlHeldForZoom = useRef(false);
+  const prevTouchCount    = useRef(0);
 
-  const handleTouchStart = useCallback((e: GestureResponderEvent) => {
-    const touches = e.nativeEvent.touches;
-    if (!touches || touches.length === 0) return;
+  // ── PanResponder trackpad (proper multi-touch on Android) ───────────
+  //
+  // Raw onTouchStart/Move/End do NOT reliably populate nativeEvent.touches
+  // for multi-touch on Android. PanResponder properly claims the gesture
+  // via the Responder system, ensuring Android dispatches all pointer data.
 
-    const touch = touches[0];
-    touchCount.current     = touches.length;
-    prevTouch.current      = { x: touch.pageX, y: touch.pageY };
-    touchStartPos.current  = { x: touch.pageX, y: touch.pageY };
-    touchStartTime.current = Date.now();
-    totalMovement.current  = 0;
-    scrollAccum.current    = 0;
-    isDragging.current     = false;
+  const trackpadResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder:  () => true,
+    onShouldBlockNativeResponder: () => true,
 
-    if (longPressTimer.current) clearTimeout(longPressTimer.current);
-    longPressTimer.current = setTimeout(() => {
-      if (totalMovement.current < 10) {
-        isDragging.current = true;
-        Vibration.vibrate(10);
-        connectionManager.send(MSG.MOUSE_DOWN, { button: 'left' });
+    onPanResponderGrant: (e, _gs) => {
+      const touches = e.nativeEvent.touches;
+      if (!touches || touches.length === 0) return;
+
+      const touch = e.nativeEvent.changedTouches?.[0] || touches[0];
+      touchCount.current     = touches.length;
+      prevTouch.current      = { x: touch.pageX, y: touch.pageY, id: touch.identifier };
+      touchStartPos.current  = { x: touch.pageX, y: touch.pageY };
+      touchStartTime.current = Date.now();
+      totalMovement.current  = 0;
+      scrollAccum.current    = 0;
+      isDragging.current     = false;
+      prevPinchDist.current  = -1;
+      prevTouchCount.current = touches.length;
+
+      // Long-press → drag (only for single finger, not during button-hold)
+      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      if (!isButtonDown.current && touches.length === 1) {
+        longPressTimer.current = setTimeout(() => {
+          if (totalMovement.current < 10) {
+            isDragging.current = true;
+            Vibration.vibrate(10);
+            connectionManager.send(MSG.MOUSE_DOWN, { button: 'left' });
+          }
+        }, 400);
       }
-    }, 400);
-  }, []);
+    },
 
-  const handleTouchMove = useCallback((e: GestureResponderEvent) => {
-    const touches = e.nativeEvent.touches;
-    if (!touches || touches.length === 0) return;
+    onPanResponderMove: (e, gs) => {
+      const touches = e.nativeEvent.touches;
+      if (!touches || touches.length === 0) return;
 
-    const touch = touches[0];
-    const dx    = touch.pageX - prevTouch.current.x;
-    const dy    = touch.pageY - prevTouch.current.y;
-    prevTouch.current = { x: touch.pageX, y: touch.pageY };
+      const numTouches = gs.numberActiveTouches;
 
-    totalMovement.current += Math.abs(dx) + Math.abs(dy);
+      // Detect 1→2+ finger transition: initialize pinch baseline
+      if (numTouches >= 2 && prevTouchCount.current < 2 && touches.length >= 2) {
+        const t0 = touches[0];
+        const t1 = touches[1];
+        prevPinchDist.current = Math.hypot(t1.pageX - t0.pageX, t1.pageY - t0.pageY);
+        pinchAccum.current    = 0;
+        scrollAccum.current   = 0;
 
-    if (totalMovement.current > 10 && longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
-
-    const numTouches = touches.length;
-    touchCount.current = numTouches;
-
-    if (numTouches === 1) {
-      const sens = trackpadSensRef.current;
-      const rdx = Math.round(dx * sens);
-      const rdy = Math.round(dy * sens);
-      if (rdx !== 0 || rdy !== 0) {
-        connectionManager.send(MSG.MOUSE_MOVE, { dx: rdx, dy: rdy });
+        // Cancel long-press when second finger appears
+        if (longPressTimer.current) {
+          clearTimeout(longPressTimer.current);
+          longPressTimer.current = null;
+        }
       }
-    } else if (numTouches >= 2) {
-      scrollAccum.current += dy * SCROLL_SENSITIVITY;
-      const ticks = Math.trunc(scrollAccum.current);
-      if (ticks !== 0) {
-        scrollAccum.current -= ticks;
-        connectionManager.send(MSG.MOUSE_SCROLL, { dx: 0, dy: -ticks });
+      prevTouchCount.current = numTouches;
+
+      // Find the tracked primary finger for deltas
+      let targetTouch = touches.find((t: any) => t.identifier === prevTouch.current.id);
+      if (!targetTouch) {
+        targetTouch = e.nativeEvent.changedTouches?.[0] || touches[0];
+        prevTouch.current = { x: targetTouch.pageX, y: targetTouch.pageY, id: targetTouch.identifier };
+        return; // Skip this frame (new baseline)
       }
-    }
-  }, []);
 
-  const handleTouchEnd = useCallback((e: GestureResponderEvent) => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
+      const dx = targetTouch.pageX - prevTouch.current.x;
+      const dy = targetTouch.pageY - prevTouch.current.y;
+      prevTouch.current = { x: targetTouch.pageX, y: targetTouch.pageY, id: targetTouch.identifier };
 
-    if (isDragging.current) {
+      totalMovement.current += Math.abs(dx) + Math.abs(dy);
+
+      if (totalMovement.current > 10 && longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+
+      touchCount.current = numTouches;
+
+      if (numTouches === 1) {
+        // Single finger → mouse move (drag works automatically if button is toggled)
+        const sens = trackpadSensRef.current;
+        const rdx = Math.round(dx * sens);
+        const rdy = Math.round(dy * sens);
+        if (rdx !== 0 || rdy !== 0) {
+          connectionManager.send(MSG.MOUSE_MOVE, { dx: rdx, dy: rdy });
+        }
+      } else if (numTouches >= 2 && touches.length >= 2) {
+        // ── Pinch-to-zoom detection ──────────────────────────────────
+        const t0 = touches[0];
+        const t1 = touches[1];
+        const curDist = Math.hypot(t1.pageX - t0.pageX, t1.pageY - t0.pageY);
+
+        if (prevPinchDist.current < 0) {
+          // First frame with 2 fingers — just set baseline
+          prevPinchDist.current = curDist;
+          return;
+        }
+
+        const deltaDist = curDist - prevPinchDist.current;
+        prevPinchDist.current = curDist;
+
+        // If fingers are spreading/pinching significantly → zoom
+        const PINCH_THRESHOLD = 2; // px per frame
+        if (Math.abs(deltaDist) > PINCH_THRESHOLD) {
+          // Hold Ctrl on first zoom frame
+          if (!isCtrlHeldForZoom.current) {
+            isCtrlHeldForZoom.current = true;
+            connectionManager.send(MSG.KEY_DOWN, { key: 'control' });
+          }
+          // Translate pinch delta into scroll ticks
+          pinchAccum.current += deltaDist * 0.03;
+          const zoomTicks = Math.trunc(pinchAccum.current);
+          if (zoomTicks !== 0) {
+            pinchAccum.current -= zoomTicks;
+            connectionManager.send(MSG.MOUSE_SCROLL, { dx: 0, dy: zoomTicks });
+          }
+        } else {
+          // ── Normal 2-finger scroll ────────────────────────────────
+          scrollAccum.current += dy * SCROLL_SENSITIVITY;
+          const ticks = Math.trunc(scrollAccum.current);
+          if (ticks !== 0) {
+            scrollAccum.current -= ticks;
+            const dir = invertScrollRef.current ? 1 : -1;
+            connectionManager.send(MSG.MOUSE_SCROLL, { dx: 0, dy: ticks * dir });
+          }
+        }
+      }
+    },
+
+    onPanResponderRelease: (_e, _gs) => {
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+
+      // Release Ctrl if we were zooming
+      if (isCtrlHeldForZoom.current) {
+        connectionManager.send(MSG.KEY_UP, { key: 'control' });
+        isCtrlHeldForZoom.current = false;
+        pinchAccum.current = 0;
+      }
+
+      if (isDragging.current) {
+        connectionManager.send(MSG.MOUSE_UP, { button: 'left' });
+        isDragging.current = false;
+        touchCount.current = 0;
+        prevPinchDist.current = -1;
+        prevTouchCount.current = 0;
+        return;
+      }
+
+      const duration = Date.now() - touchStartTime.current;
+      const moved    = totalMovement.current;
+
+      // Tap detection — skip if a button is toggled (avoids spurious clicks)
+      if (moved < 10 && duration < 250 && !isButtonDown.current) {
+        const button = touchCount.current >= 2 ? 'right' : 'left';
+        connectionManager.send(MSG.MOUSE_CLICK, { button });
+      }
+
+      touchCount.current = 0;
+      prevPinchDist.current = -1;
+      prevTouchCount.current = 0;
+    },
+
+    onPanResponderTerminate: (_e, _gs) => {
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+      if (isCtrlHeldForZoom.current) {
+        connectionManager.send(MSG.KEY_UP, { key: 'control' });
+        isCtrlHeldForZoom.current = false;
+      }
+      if (isDragging.current) {
+        connectionManager.send(MSG.MOUSE_UP, { button: 'left' });
+        isDragging.current = false;
+      }
+      touchCount.current = 0;
+      prevPinchDist.current = -1;
+      prevTouchCount.current = 0;
+    },
+  })).current;
+
+  // ── Click button handlers (TOGGLE mode) ──────────────────────────────
+  //
+  // Android cannot handle simultaneous touches across separate Views.
+  // Buttons use tap-to-lock / tap-to-unlock instead of press-and-hold.
+  // Workflow: tap LEFT → button locks MOUSE_DOWN → drag on trackpad →
+  //           tap LEFT again → releases MOUSE_UP.
+
+  const [leftActive, setLeftActive] = useState(false);
+  const [rightActive, setRightActive] = useState(false);
+
+  const handleLeftToggle = useCallback(() => {
+    if (buttonHeld.current === 'left') {
+      // Release left
       connectionManager.send(MSG.MOUSE_UP, { button: 'left' });
-      isDragging.current = false;
-      return;
+      buttonHeld.current = null;
+      isButtonDown.current = false;
+      setLeftActive(false);
+    } else {
+      // Release whatever was held first
+      if (buttonHeld.current === 'right') {
+        connectionManager.send(MSG.MOUSE_UP, { button: 'right' });
+        setRightActive(false);
+      }
+      // Hold left
+      connectionManager.send(MSG.MOUSE_DOWN, { button: 'left' });
+      buttonHeld.current = 'left';
+      isButtonDown.current = true;
+      setLeftActive(true);
+      Vibration.vibrate(5);
     }
-
-    const duration = Date.now() - touchStartTime.current;
-    const moved    = totalMovement.current;
-
-    if (moved < 10 && duration < 250) {
-      const button = touchCount.current >= 2 ? 'right' : 'left';
-      connectionManager.send(MSG.MOUSE_CLICK, { button });
-    }
-
-    touchCount.current = 0;
   }, []);
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder:  () => true,
-      onPanResponderGrant:          (e) => handleTouchStart(e),
-      onPanResponderMove:           (e) => handleTouchMove(e),
-      onPanResponderRelease:        (e) => handleTouchEnd(e),
-      onPanResponderTerminate:      (e) => handleTouchEnd(e),
-      onShouldBlockNativeResponder: () => true,
-    })
-  ).current;
-
-  // ── Click button handlers ────────────────────────────────────────────
-
-  const sendLeftClick  = useCallback(() => connectionManager.send(MSG.MOUSE_CLICK, { button: 'left' }),  []);
-  const sendRightClick = useCallback(() => connectionManager.send(MSG.MOUSE_CLICK, { button: 'right' }), []);
-
-  const leftButtonDown = useRef(false);
-  const handleLeftPressIn   = useCallback(() => { leftButtonDown.current = true;  }, []);
-  const handleLeftPressOut  = useCallback(() => { leftButtonDown.current = false; }, []);
-  const handleLeftLongPress = useCallback(() => {
-    connectionManager.send(MSG.MOUSE_DOWN, { button: 'left' });
-    leftButtonDown.current = true;
+  const handleRightToggle = useCallback(() => {
+    if (buttonHeld.current === 'right') {
+      // Release right
+      connectionManager.send(MSG.MOUSE_UP, { button: 'right' });
+      buttonHeld.current = null;
+      isButtonDown.current = false;
+      setRightActive(false);
+    } else {
+      // Release whatever was held first
+      if (buttonHeld.current === 'left') {
+        connectionManager.send(MSG.MOUSE_UP, { button: 'left' });
+        setLeftActive(false);
+      }
+      // Hold right
+      connectionManager.send(MSG.MOUSE_DOWN, { button: 'right' });
+      buttonHeld.current = 'right';
+      isButtonDown.current = true;
+      setRightActive(true);
+      Vibration.vibrate(5);
+    }
   }, []);
 
   // ── Keyboard ─────────────────────────────────────────────────────────
@@ -207,14 +352,21 @@ export default function MouseModule() {
     }
   }, [showKeyboard]);
 
-  // ── Gyroscope Laser (Industry-Standard Smoothing Pipeline) ───────────────
+  // ── Gyroscope Laser — Complementary Filter Fusion ────────────────────────
   //
-  // Matches feel of Sony DualSense / Steam Deck gyro aiming:
+  // Fuses gyro + accelerometer to produce world-space (screen-aligned) motion.
+  // Matches the industry standard (DualSense, Steam Deck, Wiimote, Switch Pro):
+  //   • Gyro = high-frequency angular rate, but drifts and body-frame only
+  //   • Accelerometer = gravity vector = absolute roll/pitch, noisy at high freq
+  //   • Complementary filter: 98 % gyro (fast response) + 2 % accel (drift lock)
+  //
+  // Pipeline:
   // 1. Bias Drift Correction: dynamically tracks thermal drift at rest
-  // 2. Soft Dead Zone: smoothly tapers micro-jitter to zero
-  // 3. Per-Axis Adaptive Alpha: fast tilts dodge lag, slow tilts get filtered
-  // 4. Power Curve Ballistics: exponential acceleration curve for precise
-  //    slow movements and rapid fast swipes
+  // 2. World-Frame Projection: uses complementary-filter orientation to
+  //    rotate body-frame gyro rates into screen-aligned axes
+  // 3. Soft Dead Zone: smoothly tapers micro-jitter to zero
+  // 4. Per-Axis Adaptive EMA: fast tilts dodge lag, slow tilts get filtered
+  // 5. Power Curve Ballistics: exponential acceleration curve
 
   const toggleLaserMode = useCallback(() => {
     setLaserMode(prev => {
@@ -222,63 +374,125 @@ export default function MouseModule() {
       if (next) {
         gyroAccum.current = { dx: 0, dy: 0 };
 
-        // ── Raw 1:1 Hardware Mapping (PUBG Style) ──────────────────────────────────
-        //
-        // Game-like gyro feel: NO smoothing, NO mouse acceleration, NO EMA lag.
-        // Pure 1:1 translation from hardware sensor to screen.
-        
-        Gyroscope.setUpdateInterval(16); // 60Hz from hardware (SensorManager.SENSOR_DELAY_GAME)
-        gyroSubscription.current = Gyroscope.addListener(({ x, y, z }) => {
-          const sens = gyroSensRef.current;
+        let biasX = 0, biasY = 0, biasZ = 0;
+        let restFrames = 0;
+        let smoothDx = 0, smoothDy = 0;
 
-          // Static Noise Floor (~1 deg/s)
-          // Kills table vibration/drift without adding software latency.
-          const cleanX = Math.abs(x) < 0.02 ? 0 : x;
-          const cleanY = Math.abs(y) < 0.02 ? 0 : y;
-          const cleanZ = Math.abs(z) < 0.02 ? 0 : z;
-          
-          // Ergonomic Axis Fusion & Translation
-          // CRITICAL SIGN FIX: Yaw Right (-Z) and Roll Right (+Y) are naturally
-          // performed together by the human wrist. We must SUBTRACT them so they
-          // accumulate into movement instead of canceling each other out.
-          const rawDx = (cleanZ - cleanY) * -sens; 
-          const rawDy = cleanX * -sens;
+        // Complementary filter state
+        let worldPitch = 0; // radians, tilt forward/back
+        let worldRoll  = 0; // radians, tilt left/right
+        let lastTimestamp = 0; // hardware timestamp (ms)
+        const COMP_ALPHA = 0.98; // trust gyro 98%, accel 2%
+        const DT_FALLBACK = 0.016;
 
-          // Pure accumulation (no ballistics/curves)
-          gyroAccum.current.dx += rawDx;
-          gyroAccum.current.dy += rawDy;
+        // Cached trig values — only recompute when orientation changes > 0.5°
+        let cachedCosRoll = 1, cachedSinRoll = 0, cachedCosPitch = 1;
+        let lastTrigPitch = 0, lastTrigRoll = 0;
+        const TRIG_THRESH = 0.009; // ~0.5° in radians
+
+        const softDeadZone = (v: number, inner: number, outer: number) => {
+          const abs = Math.abs(v);
+          if (abs < inner) return 0;
+          if (abs > outer) return v;
+          const t = (abs - inner) / (outer - inner);
+          return (v / abs) * abs * t;
+        };
+
+        // ── Gravity ref: accel writes at 30Hz, gyro reads atomically ──
+        const gravityRef = { pitch: 0, roll: 0 };
+
+        Accelerometer.setUpdateInterval(33); // 30Hz — enough for drift correction
+        accelSubscription.current = Accelerometer.addListener(({ x, y, z }) => {
+          gravityRef.pitch = Math.atan2(-x, Math.sqrt(y * y + z * z));
+          gravityRef.roll  = Math.atan2(y, z);
         });
 
-        // 5. V-Sync aligned socket transmission!
-        // Android sensor callbacks often batch in heavy bursts (e.g., 3 events in 2ms, then gap).
-        // Sending TLS strings instantly on bursts obliterates the React Native Bridge and causes lag.
-        // We sync transmission to requestAnimationFrame to perfectly match screen-refresh pacing
-        // exactly like how the PanResponder (trackpad) behaves!
-        let rAFId: number = 0;
-        const flushLoop = () => {
-          rAFId = requestAnimationFrame(flushLoop);
+        // ── Gyroscope: integrate into world frame, project to screen ──
+        Gyroscope.setUpdateInterval(4); // request 250Hz, get hardware max (~100–200Hz)
+        gyroSubscription.current = Gyroscope.addListener(({ x, y, z, timestamp }) => {
+          // timestamp: nanoseconds on Android, milliseconds on iOS
+          const tsMs = Platform.OS === 'android' ? timestamp / 1_000_000 : timestamp;
+          const dt = lastTimestamp
+            ? Math.min((tsMs - lastTimestamp) / 1000, 0.05)
+            : DT_FALLBACK;
+          lastTimestamp = tsMs;
 
-          const acc = gyroAccum.current;
-          const dx = Math.round(acc.dx);
-          const dy = Math.round(acc.dy);
+          const sens = gyroSensRef.current;
 
-          if (dx !== 0 || dy !== 0) {
-            connectionManager.send(MSG.MOUSE_MOVE, { dx, dy });
-            acc.dx -= dx; // Keep fractional remainder
-            acc.dy -= dy;
+          // 1. Bias drift correction (body frame)
+          const speed = Math.sqrt(x * x + y * y + z * z);
+          if (speed < 0.5) {
+            restFrames++;
+            if (restFrames > 10) {
+              biasX = 0.98 * biasX + 0.02 * x;
+              biasY = 0.98 * biasY + 0.02 * y;
+              biasZ = 0.98 * biasZ + 0.02 * z;
+            }
+          } else {
+            restFrames = 0;
           }
-        };
-        flushLoop();
 
-        // Save rAF id to the timer ref so we can cancel it
-        gyroFlushTimer.current = rAFId as any;
+          const cx = x - biasX;
+          const cy = y - biasY;
+          const cz = z - biasZ;
+
+          // 2. Complementary filter: gyro integrates fast, accel anchors slow drift
+          worldPitch = COMP_ALPHA * (worldPitch + cx * dt) + (1 - COMP_ALPHA) * gravityRef.pitch;
+          worldRoll  = COMP_ALPHA * (worldRoll  + cz * dt) + (1 - COMP_ALPHA) * gravityRef.roll;
+
+          // 3. Cached trig — only recompute when orientation shifts > 0.5°
+          if (Math.abs(worldRoll - lastTrigRoll) > TRIG_THRESH || Math.abs(worldPitch - lastTrigPitch) > TRIG_THRESH) {
+            cachedCosRoll  = Math.cos(worldRoll);
+            cachedSinRoll  = Math.sin(worldRoll);
+            cachedCosPitch = Math.cos(worldPitch);
+            lastTrigRoll   = worldRoll;
+            lastTrigPitch  = worldPitch;
+          }
+
+          // 4. Project body-frame rates into screen-aligned axes
+          const screenDx = (cz * cachedCosRoll + cx * cachedSinRoll) * -sens;
+          const screenDy = cx * cachedCosPitch * -sens;
+
+          // 5. Soft dead zone
+          const rawDx = softDeadZone(screenDx, 0.3, 1.2);
+          const rawDy = softDeadZone(screenDy, 0.3, 1.2);
+
+          // 6. Per-axis adaptive EMA (raised floor: 0.40 → ~25ms on slow tilts)
+          const absX = Math.abs(rawDx);
+          const absY = Math.abs(rawDy);
+
+          const alphaX = absX < 0.4 ? 0 : 0.40 + Math.min(1, (absX - 0.4) / 5) * 0.50;
+          const alphaY = absY < 0.4 ? 0 : 0.40 + Math.min(1, (absY - 0.4) / 5) * 0.50;
+
+          smoothDx = alphaX * rawDx + (1 - alphaX) * smoothDx;
+          smoothDy = alphaY * rawDy + (1 - alphaY) * smoothDy;
+
+          // 7. Light ballistics — linear below 1.0, lighter curve above
+          const applyBallistics = (v: number) => {
+            if (v === 0) return 0;
+            const sign = v < 0 ? -1 : 1;
+            const abs = Math.abs(v);
+            return sign * (abs < 1 ? abs * 0.6 : Math.pow(abs, 1.3) * 0.28);
+          };
+
+          gyroAccum.current.dx += applyBallistics(smoothDx);
+          gyroAccum.current.dy += applyBallistics(smoothDy);
+
+          // Send directly — NO rAF, same as trackpad
+          const acc = gyroAccum.current;
+          const ddx = Math.round(acc.dx);
+          const ddy = Math.round(acc.dy);
+          if (ddx !== 0 || ddy !== 0) {
+            connectionManager.send(MSG.MOUSE_MOVE, { dx: ddx, dy: ddy });
+            acc.dx -= ddx;
+            acc.dy -= ddy;
+          }
+        });
       } else {
         gyroSubscription.current?.remove();
         gyroSubscription.current = null;
-        if (gyroFlushTimer.current) {
-          cancelAnimationFrame(gyroFlushTimer.current as any);
-          gyroFlushTimer.current = null;
-        }
+        accelSubscription.current?.remove();
+        accelSubscription.current = null;
       }
       return next;
     });
@@ -287,7 +501,7 @@ export default function MouseModule() {
   useEffect(() => {
     return () => {
       gyroSubscription.current?.remove();
-      if (gyroFlushTimer.current) cancelAnimationFrame(gyroFlushTimer.current as any);
+      accelSubscription.current?.remove();
     };
   }, []);
 
@@ -314,7 +528,10 @@ export default function MouseModule() {
     >
 
       {/* ── Trackpad surface ─────────────────────────────────────────── */}
-      <View style={styles.trackpad} {...panResponder.panHandlers}>
+      <View 
+        style={styles.trackpad}
+        {...trackpadResponder.panHandlers}
+      >
         <View style={styles.crosshairH} />
         <View style={styles.crosshairV} />
         <View style={styles.trackpadCorner_TL} />
@@ -334,7 +551,7 @@ export default function MouseModule() {
             <Text style={styles.gestureHintText}>1 finger — move</Text>
           </View>
           <View style={styles.gestureHintRow}>
-            <Text style={styles.gestureHintText}>2 finger — scroll</Text>
+            <Text style={styles.gestureHintText}>2 finger — scroll · pinch — zoom</Text>
           </View>
         </View>
       </View>
@@ -348,33 +565,33 @@ export default function MouseModule() {
         />
       )}
 
-      {/* ── Click button row ─────────────────────────────────────────── */}
+      {/* ── Click button row (TOGGLE: tap to lock/unlock) ────────────── */}
       <View style={styles.buttonRow}>
         <TouchableOpacity
-          style={styles.clickBtn}
-          onPress={sendLeftClick}
-          onPressIn={handleLeftPressIn}
-          onPressOut={handleLeftPressOut}
-          onLongPress={handleLeftLongPress}
-          delayLongPress={400}
-          activeOpacity={0.55}
+          style={[styles.clickBtn, leftActive && styles.clickBtnActive]}
+          onPress={handleLeftToggle}
+          activeOpacity={0.7}
         >
           <View style={styles.clickBtnInner}>
-            <View style={styles.clickBar} />
-            <Text style={styles.clickLabel}>LEFT</Text>
+            <View style={[styles.clickBar, leftActive && styles.clickBarActive]} />
+            <Text style={[styles.clickLabel, leftActive && styles.clickLabelActive]}>
+              {leftActive ? 'LEFT  ●' : 'LEFT'}
+            </Text>
           </View>
         </TouchableOpacity>
 
         <View style={styles.btnDivider} />
 
         <TouchableOpacity
-          style={styles.clickBtn}
-          onPress={sendRightClick}
-          activeOpacity={0.55}
+          style={[styles.clickBtn, rightActive && styles.clickBtnActive]}
+          onPress={handleRightToggle}
+          activeOpacity={0.7}
         >
           <View style={styles.clickBtnInner}>
-            <View style={styles.clickBar} />
-            <Text style={styles.clickLabel}>RIGHT</Text>
+            <View style={[styles.clickBar, rightActive && styles.clickBarActive]} />
+            <Text style={[styles.clickLabel, rightActive && styles.clickLabelActive]}>
+              {rightActive ? 'RIGHT  ●' : 'RIGHT'}
+            </Text>
           </View>
         </TouchableOpacity>
       </View>
@@ -464,6 +681,17 @@ export default function MouseModule() {
               />
             </View>
             <Text style={styles.sliderValue}>{gyroSens}</Text>
+          </View>
+
+          {/* Invert Scroll toggle */}
+          <View style={styles.switchRow}>
+            <Text style={styles.sliderLabel}>Invert Scroll</Text>
+            <Switch
+              value={invertScroll}
+              onValueChange={setInvertScroll}
+              trackColor={{ false: Theme.colors.surfaceElevated, true: Theme.colors.accent }}
+              thumbColor={Theme.colors.textPrimary}
+            />
           </View>
         </Animated.View>
       )}
@@ -603,6 +831,15 @@ const styles = StyleSheet.create({
     backgroundColor: Theme.colors.border,
     marginVertical: 16,
   },
+  clickBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  clickBarActive: {
+    backgroundColor: Theme.colors.accent,
+  },
+  clickLabelActive: {
+    color: Theme.colors.accent,
+  },
 
   // ── FAB Container ────────────────────────────────────────────────────
   fabContainer: {
@@ -653,6 +890,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Theme.spacing.md,
+  },
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   sliderLabel: {
     width: 80,

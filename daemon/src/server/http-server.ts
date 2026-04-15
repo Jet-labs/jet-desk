@@ -3,7 +3,7 @@ import https from 'https';
 import { TlsCredentials } from '../security/tls.js';
 import { generateQrCode, validateSessionToken } from '../security/pairing.js';
 import { getConnectionsSummary } from '../security/auth.js';
-import { config } from '../config/index.js';
+import { config, CustomRemoteConfig } from '../config/index.js';
 import { captureScreen } from '../capture/screen.js';
 import { renderConsole } from './console.js';
 import { getLogEntries, getUptime } from './logger.js';
@@ -244,15 +244,75 @@ export function startHttpServer(creds: TlsCredentials): https.Server {
     res.json({ ok: true });
   });
 
-  // ── Custom remotes endpoint ───────────────────────────────────────────────
-  app.get('/remotes', (req: Request, res: Response) => {
+  // ── Custom remotes CRUD ───────────────────────────────────────────────────
+  // Helper: require valid session token from request headers
+  function requireAuth(req: Request, res: Response): string | null {
     const token = req.headers['x-session-token'] as string;
-    if (!token || !validateSessionToken(token)) {
-      res.status(401).json({ error: 'Unauthorized' });
+    if (!token) {
+      res.status(401).json({ error: 'Missing session token' });
+      return null;
+    }
+    const deviceId = validateSessionToken(token);
+    if (!deviceId) {
+      res.status(403).json({ error: 'Invalid or expired session token' });
+      return null;
+    }
+    return deviceId;
+  }
+
+  // GET /api/remotes — list all custom remotes
+  app.get('/api/remotes', (req: Request, res: Response) => {
+    if (!requireAuth(req, res)) return;
+    res.json({ remotes: config.listCustomRemotes() });
+  });
+
+  // POST /api/remotes — create a new custom remote
+  app.post('/api/remotes', (req: Request, res: Response) => {
+    if (!requireAuth(req, res)) return;
+    const body = req.body as Partial<CustomRemoteConfig>;
+    if (!body.name || !body.icon || !Array.isArray(body.buttons)) {
+      res.status(400).json({ error: 'Missing required fields: name, icon, buttons' });
       return;
     }
-    const customRemotes = config.get('customRemotes' as any) || [];
-    res.json({ remotes: customRemotes });
+    const remote: CustomRemoteConfig = {
+      id: body.id || `remote-${Date.now()}`,
+      name: body.name,
+      icon: body.icon,
+      columns: body.columns ?? 3,
+      enabled: body.enabled !== undefined ? body.enabled : true,
+      buttons: body.buttons,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    config.addCustomRemote(remote);
+    res.json({ ok: true, remote });
+  });
+
+  // PATCH /api/remotes/:id — update an existing custom remote
+  app.patch('/api/remotes/:id', (req: Request<{ id: string }>, res: Response) => {
+    if (!requireAuth(req, res)) return;
+    const { id } = req.params;
+    const existing = config.getCustomRemote(id);
+    if (!existing) {
+      res.status(404).json({ error: 'Remote not found' });
+      return;
+    }
+    const body = req.body as Partial<CustomRemoteConfig>;
+    const allowed = ['name', 'icon', 'columns', 'enabled', 'buttons'] as const;
+    const updates: Partial<CustomRemoteConfig> = { updatedAt: Date.now() };
+    for (const key of allowed) {
+      if (body[key] !== undefined) (updates as any)[key] = body[key];
+    }
+    config.updateCustomRemote(id, updates);
+    res.json({ ok: true });
+  });
+
+  // DELETE /api/remotes/:id — remove a custom remote
+  app.delete('/api/remotes/:id', (req: Request<{ id: string }>, res: Response) => {
+    if (!requireAuth(req, res)) return;
+    const { id } = req.params;
+    config.removeCustomRemote(id);
+    res.json({ ok: true });
   });
 
   // ── Start ─────────────────────────────────────────────────────────────────

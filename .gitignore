@@ -24,8 +24,6 @@ yarn-error.log*
 # Build outputs
 dist/
 build/
-*.exe
-*.apk
 
 # Environment variables
 .env
@@ -52,3 +50,6 @@ daemon/JetDeskDaemon.exe
 # Coverage/Testing
 coverage/
 .nyc_output/
+
+# Downloadables
+downloadables/

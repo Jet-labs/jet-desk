@@ -12,8 +12,8 @@ import {
   StyleSheet,
   Dimensions,
   ActivityIndicator,
+  Image,
 } from 'react-native';
-import { Image as ExpoImage } from 'expo-image';
 import { Monitor, AlertTriangle, Square, Settings, Cast } from 'lucide-react-native';
 
 import { useDeviceStore } from '../../src/store/deviceStore';
@@ -126,25 +126,21 @@ export default function ScreenModule() {
         >
           {/* Double Buffer Background (Persists the last loaded frame) */}
           {displayedFrame && (
-            <ExpoImage
+            <Image
               source={{ uri: displayedFrame }}
               style={[styles.streamImage, { position: 'absolute' }]}
-              contentFit="contain"
-              transition={0}
-              cachePolicy="none"
-              recyclingKey="buffer-bg"
+              resizeMode="contain"
+              fadeDuration={0}
             />
           )}
 
           {/* Double Buffer Foreground (Loads the newest frame) */}
           {currentFrame && (
-            <ExpoImage
+            <Image
               source={{ uri: currentFrame }}
               style={[styles.streamImage, { position: 'absolute' }]}
-              contentFit="contain"
-              transition={0}
-              cachePolicy="none"
-              recyclingKey="buffer-fg"
+              resizeMode="contain"
+              fadeDuration={0}
               onLoad={() => setDisplayedFrame(currentFrame)}
             />
           )}

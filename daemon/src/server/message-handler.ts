@@ -33,6 +33,11 @@ export async function handleMessage(ctx: ConnectionContext, raw: string, fingerp
     return;
   }
 
+  // Log all messages except high-frequency mouse movements
+  if (msg.type !== 'input.mouse.move') {
+    console.log(`[Message] <- ${msg.type}`, JSON.stringify(msg.payload, null, 2));
+  }
+
   // ── Heartbeat (always allowed) ────────────────────────────────────────────
   if (msg.type === 'ping') {
     send(ctx, makeMessage('pong', {}, msg.seq));
@@ -124,8 +129,31 @@ export async function handleMessage(ctx: ConnectionContext, raw: string, fingerp
 
     // ── Remote plugins ─────────────────────────────────────────────────────
     case 'remote.action': {
-      const { remoteId, actionId, value } = msg.payload as { remoteId: string; actionId: string; value?: number | string };
-      await executeRemoteAction(remoteId, actionId, value);
+      const { remoteId, actionId, value } = msg.payload as { remoteId: string; actionId: string; value?: string | number };
+      await executeRemoteAction(remoteId, actionId, value, ctx);
+      break;
+    }
+    case 'remote.config.pull': {
+      send(ctx, makeMessage('remote.config.pull.response', { remotes: config.listCustomRemotes() }, msg.seq));
+      break;
+    }
+    case 'remote.config.push': {
+      const remoteConfig = msg.payload as any; // CustomRemoteConfig
+      const existing = config.getCustomRemote(remoteConfig.id);
+      if (existing) {
+        config.updateCustomRemote(remoteConfig.id, remoteConfig);
+      } else {
+        config.addCustomRemote(remoteConfig);
+      }
+      send(ctx, makeMessage('remote.config.push.response', { ok: true }, msg.seq));
+      broadcastRemoteConfigs();
+      break;
+    }
+    case 'remote.config.delete': {
+      const { id } = msg.payload as { id: string };
+      config.removeCustomRemote(id);
+      send(ctx, makeMessage('remote.config.delete.response', { ok: true }, msg.seq));
+      broadcastRemoteConfigs();
       break;
     }
 
@@ -373,4 +401,11 @@ export function send(ctx: ConnectionContext, msg: JetDeskMessage): void {
 
 function sendError(ctx: ConnectionContext, reason: string, seq = 0): void {
   send(ctx, { v: 1, seq, type: 'pairing.reject', payload: { reason } });
+}
+
+function broadcastRemoteConfigs(): void {
+  import('./tls-server.js').then(({ broadcastToAuthenticated }) => {
+    const msg = makeMessage('remote.config.pull.response', { remotes: config.listCustomRemotes() });
+    broadcastToAuthenticated(JSON.stringify(msg));
+  }).catch(e => console.error('[Handler] Broadcast error:', e));
 }

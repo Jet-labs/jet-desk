@@ -61,7 +61,7 @@ function buildMouseInput(dx: number, dy: number, flags: number, mouseData = 0): 
   // bytes 4-7: implicit padding
   buf.writeInt32LE(dx, 8);
   buf.writeInt32LE(dy, 12);
-  buf.writeUInt32LE(mouseData, 16);
+  buf.writeInt32LE(mouseData, 16);
   buf.writeUInt32LE(flags, 20);
   buf.writeUInt32LE(0, 24); // time: 0 = system timestamp
   // bytes 28-31: pad; 32-39: dwExtraInfo = 0 (already zeroed)
@@ -76,9 +76,35 @@ function sendInputs(inputs: Buffer[]): void {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/** Move mouse relative to current position */
+// ─── Jitter buffer: accumulate + 60Hz flush ────────────────────────────────
+// Decouples network arrival jitter from cursor movement.
+// Packets accumulate; a display-sync timer flushes at 60Hz.
+let pendingDx = 0;
+let pendingDy = 0;
+let flushTimer: ReturnType<typeof setInterval> | null = null;
+
+function startFlushTimer() {
+  if (flushTimer) return;
+  flushTimer = setInterval(() => {
+    if (pendingDx === 0 && pendingDy === 0) return;
+    sendInputs([buildMouseInput(pendingDx, pendingDy, MOUSEEVENTF.MOVE)]);
+    pendingDx = 0;
+    pendingDy = 0;
+  }, 16);
+}
+
+export function stopFlushTimer() {
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+}
+
+/** Accumulate a mouse move delta — flush happens at 60Hz */
 export function moveMouse(dx: number, dy: number): void {
-  sendInputs([buildMouseInput(dx, dy, MOUSEEVENTF.MOVE)]);
+  pendingDx += dx;
+  pendingDy += dy;
+  startFlushTimer();
 }
 
 /** Move mouse to absolute screen coordinates */

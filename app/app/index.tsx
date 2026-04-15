@@ -20,6 +20,7 @@ import {
   Keyboard,
   ActivityIndicator,
   Platform,
+  RefreshControl,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -35,11 +36,21 @@ export default function DiscoveryHub() {
 
   const [manualIp, setManualIp]               = useState('');
   const [connectingDeviceId, setConnectingDeviceId] = useState<string | null>(null);
+  const [refreshing, setRefreshing]           = useState(false);
 
-  const { discoveredDevices, status, connect } = useConnectivity();
+  const { discoveredDevices, status, connect, retryScan } = useConnectivity();
   const { devices, loadDevices, setActiveDevice, removeDevice } = useDeviceStore();
 
   useEffect(() => { loadDevices(); }, []);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    retryScan();
+    loadDevices();
+    setTimeout(() => {
+      setRefreshing(false);
+    }, 1000);
+  }, [retryScan, loadDevices]);
 
   useFocusEffect(useCallback(() => {
     setConnectingDeviceId(null);
@@ -111,6 +122,14 @@ export default function DiscoveryHub() {
         contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + Theme.spacing.xxl }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={Theme.colors.accent}
+            colors={[Theme.colors.accent]}
+          />
+        }
       >
 
         {/* ── Wordmark ───────────────────────────────────────────────── */}

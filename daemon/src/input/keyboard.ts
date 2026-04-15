@@ -1,10 +1,11 @@
 import koffi from 'koffi';
 import os from 'os';
-import { resolveVk, normalizeModifier } from './vk-codes.js';
+import { resolveVk, normalizeModifier, isExtendedKey } from './vk-codes.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const INPUT_KEYBOARD   = 1;
+const KEYEVENTF_EXTENDEDKEY = 0x0001;
 const KEYEVENTF_KEYUP  = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const INPUT_SIZE = 40;
@@ -38,7 +39,14 @@ function buildKeyInput(vk: number, flags: number, scan = 0): Buffer {
   // bytes 4-7: padding
   buf.writeUInt16LE(vk, 8);      // wVk
   buf.writeUInt16LE(scan, 10);   // wScan
-  buf.writeUInt32LE(flags, 12);  // dwFlags
+  
+  // Automatically add EXTENDEDKEY flag if the VK requires it
+  let finalFlags = flags;
+  if (isExtendedKey(vk)) {
+    finalFlags |= KEYEVENTF_EXTENDEDKEY;
+  }
+  
+  buf.writeUInt32LE(finalFlags, 12);  // dwFlags
   buf.writeUInt32LE(0, 16);      // time
   // bytes 20-31: pad + extraInfo = 0
   return buf;
@@ -55,8 +63,16 @@ function buildUnicodeInput(charCode: number, flags: number): Buffer {
 
 function send(inputs: Buffer[]): void {
   if (!SendInput) throw new Error('Keyboard not initialized');
+  
   const combined = Buffer.concat(inputs);
-  SendInput(inputs.length, combined, INPUT_SIZE);
+  console.log("ready for sending input",inputs,combined, INPUT_SIZE)
+  const result = SendInput(inputs.length, combined, INPUT_SIZE);
+  
+  if (result !== inputs.length) {
+    console.error(`[Keyboard] SendInput failed. Expected ${inputs.length} inputs, got ${result}. Last error: ${process.platform === 'win32' ? 'See Windows event logs or check privileges.' : 'N/A'}`);
+  } else {
+    // console.log(`[Keyboard] SendInput success: ${result} events dispatched`);
+  }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

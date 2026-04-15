@@ -55,6 +55,13 @@ function AppContent() {
               gestureEnabled: false,
             }}
           />
+          <Stack.Screen
+            name="remote-editor"
+            options={{
+              presentation: 'modal',
+              animation: 'slide_from_bottom',
+            }}
+          />
         </Stack>
         <StatusBar style="light" />
       </ConnectivityProvider>

@@ -21,6 +21,7 @@ export interface DaemonConfig {
     autoStartOnBoot: boolean;
     allowedShellCommands: string[];
     allowCustomShellCommands: boolean;
+    customRemotes: CustomRemoteConfig[];
 }
 
 export interface PairedDevice {
@@ -29,6 +30,27 @@ export interface PairedDevice {
     pairedAt: number;  // unix ms
     lastSeen: number;
     certFingerprint: string;
+}
+
+export interface CustomRemoteButton {
+    id: string;
+    label: string;
+    action: string;
+    payload: Record<string, any>;
+    size?: '1x1' | '2x1' | '1x2' | '2x2';
+    color?: string;
+    icon?: string;
+}
+
+export interface CustomRemoteConfig {
+    id: string;
+    name: string;
+    icon: string;
+    columns: number;
+    enabled: boolean;
+    buttons: CustomRemoteButton[];
+    createdAt: number;
+    updatedAt: number;
 }
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
@@ -54,6 +76,7 @@ const DEFAULTS: DaemonConfig = {
     autoStartOnBoot: false,
     allowedShellCommands: [],
     allowCustomShellCommands: true,
+    customRemotes: [],
 };
 
 // ─── Config manager ───────────────────────────────────────────────────────────
@@ -157,6 +180,33 @@ class ConfigManager {
         this.data.currentPin = null;
         this.data.pinExpiresAt = null;
         this.save();
+    }
+
+    // ── Custom remotes ────────────────────────────────────────────────────────
+
+    addCustomRemote(remote: CustomRemoteConfig): void {
+        this.data.customRemotes.push(remote);
+        this.save();
+    }
+
+    updateCustomRemote(id: string, updates: Partial<CustomRemoteConfig>): void {
+        const idx = this.data.customRemotes.findIndex(r => r.id === id);
+        if (idx < 0) return;
+        this.data.customRemotes[idx] = { ...this.data.customRemotes[idx], ...updates };
+        this.save();
+    }
+
+    removeCustomRemote(id: string): void {
+        this.data.customRemotes = this.data.customRemotes.filter(r => r.id !== id);
+        this.save();
+    }
+
+    getCustomRemote(id: string): CustomRemoteConfig | undefined {
+        return this.data.customRemotes.find(r => r.id === id);
+    }
+
+    listCustomRemotes(): CustomRemoteConfig[] {
+        return this.data.customRemotes;
     }
 }
 
